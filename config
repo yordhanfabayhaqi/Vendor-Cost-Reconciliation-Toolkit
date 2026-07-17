@@ -1,0 +1,245 @@
+/**
+ * Vendor Cost Reconciliation Toolkit
+ * 100% AI-generated, 100% human-directed.
+ * Directed and iterated by Yordhan Fitrians Akhmad B. based on real HR pain points —
+ * refined repeatedly for business fit, user experience, and workflow comfort.
+ * Published as a generic, reusable template. Configure everything via the ⚙️ Setup menu.
+ */
+
+/**
+ * 00_Config.gs
+ * Static constants: sheet names, folder names, schemas, API endpoint.
+ * 
+ * Runtime configuration (API keys, folder IDs, email recipients) is NOT stored here.
+ * It lives in Script Properties and is set once via the ⚙️ Setup menu.
+ * Use getConfig_(key) / saveConfig_(key, value) to read/write runtime values.
+ */
+
+const CONFIG = {
+  // ============================================================
+  // STATIC IDENTIFIERS
+  // Safe to keep in code — no secrets, no company-specific info.
+  // Change these only if you want different sheet or folder names.
+  // ============================================================
+
+  // Drive folder names (created in same parent folder as this spreadsheet)
+  FOLDER_ROOT_INBOX: 'VendorCost_Inbox',
+  FOLDER_ROOT_ARCHIVE: 'VendorCost_Archive',
+  FOLDER_VENDOR_A_USAGE: 'vendor_a_usage',
+  FOLDER_VENDOR_B_USAGE: 'vendor_b_usage',
+  FOLDER_INVOICES: 'invoices',
+
+  // System sheet names (prefix _ = system-managed)
+  SHEET_BRANCHES: '_master_cost_centers',
+  SHEET_ALIASES: '_master_aliases',
+  SHEET_INVOICES: '_invoices',
+  SHEET_LEDGER: '_ledger',
+  SHEET_UNMAPPED: '_unmapped',
+  SHEET_LOG: '_log',
+  SHEET_DASHBOARD: 'Dashboard',
+
+  // ============================================================
+  // SCRIPT PROPERTY KEYS
+  // Used by getConfig_() / saveConfig_() to read/write runtime values.
+  // The VALUES themselves are set by the user via the ⚙️ Setup menu.
+  // No default values are hardcoded. Do not paste secrets here.
+  // ============================================================
+
+  PROP_LLM_API_KEY: 'LLM_API_KEY',
+  PROP_EMAIL_RECIPIENTS: 'EMAIL_RECIPIENTS',
+  PROP_EMAIL_FROM_NAME: 'EMAIL_FROM_NAME',
+  PROP_PARENT_FOLDER_ID: 'PARENT_FOLDER_ID',
+  PROP_FOLDER_INBOX_VENDOR_A: 'FOLDER_ID_INBOX_VENDOR_A',
+  PROP_FOLDER_INBOX_VENDOR_B: 'FOLDER_ID_INBOX_VENDOR_B',
+  PROP_FOLDER_INBOX_INVOICES: 'FOLDER_ID_INBOX_INVOICES',
+  PROP_FOLDER_ARCHIVE_VENDOR_A: 'FOLDER_ID_ARCHIVE_VENDOR_A',
+  PROP_FOLDER_ARCHIVE_VENDOR_B: 'FOLDER_ID_ARCHIVE_VENDOR_B',
+  PROP_FOLDER_ARCHIVE_INVOICES: 'FOLDER_ID_ARCHIVE_INVOICES',
+
+  // ============================================================
+  // LLM API
+  // Public endpoint. Not a secret. Swap for your provider if different.
+  // ============================================================
+
+  LLM_API_URL: 'https://api.example-llm-provider.com/v1/messages',
+  LLM_API_VERSION: '2023-06-01',
+  MODEL_CHEAP: 'model-fast',   // for PDF parsing, quick tasks
+  MODEL_SMART: 'model-strong', // for higher-quality summarization
+
+  // ============================================================
+  // SHEET SCHEMAS
+  // Demonstration schemas only. Adapt column sets to your own data.
+  // Comments below flag columns that are EXAMPLE ONLY and must be
+  // remapped to your real vendor exports before production use.
+  // ============================================================
+
+  HEADERS_BRANCHES: [
+    'code',              // e.g. 'CC-001'
+    'name',              // e.g. 'North Office'
+    'type',              // e.g. 'Self' / 'Partner' / 'Franchise' / 'Contractor' / 'Trainer'
+    'active_from',
+    'active_to',
+    'prorata_eligible',  // TRUE if this cost center receives shared-overhead prorata
+    'mgmt_fee_eligible', // TRUE if this cost center receives mgmt-fee distribution
+    'notes'
+  ],
+
+  HEADERS_ALIASES: [
+    'raw_id',            // exact string as it appears in vendor exports
+    'canonical_code',    // normalized code matching _master_cost_centers.code
+    'first_seen',
+    'notes'
+  ],
+
+  HEADERS_INVOICES: [
+    'period',            // 'YYYY-MM' text
+    'provider',          // e.g. 'VendorA', 'VendorB'
+    'vertical',          // e.g. 'Category1', 'Category2', 'Combined'
+    'invoice_number',
+    'type',              // 'cost' or 'mgmt_fee'
+    'amount',
+    'ppn',               // tax
+    'total',
+    'invoice_date',
+    'due_date',
+    'source_pdf_name',
+    'source_pdf_id',
+    'imported_at'
+  ],
+
+  // ============================================================
+  // LEDGER SCHEMA — DEMONSTRATION ONLY
+  // The columns below reflect a generic ride/expense vendor pattern.
+  // Adapt the field list to your real vendor exports.
+  // Whoever adapts this must supply the real mapping in the importer.
+  // ============================================================
+  HEADERS_LEDGER: [
+    'transaction_id',
+    'provider',
+    'vertical',
+    'period',
+    'booking_time',
+    'pickup_time',
+    'completion_time',
+    'employee_name',
+    'employee_raw_id',
+    'canonical_branch_code',
+    'group_raw',
+    'service_type',
+    'pickup_location',
+    'pickup_city',
+    'destination',
+    'destination_city',
+    'distance_km',
+    'total_amount',
+    'base_fare',
+    'platform_fee',
+    'toll_fee',
+    'parking_fee',
+    'other_fee',
+    'voucher_discount',
+    'trip_reason',
+    'trip_reason_detail',
+    'imported_at',
+    'source_file'
+  ],
+
+  HEADERS_UNMAPPED: [
+    'raw_id', 'sample_employee_name', 'provider', 'first_seen', 'count_seen', 'sample_amount'
+  ],
+
+  HEADERS_LOG: [
+    'timestamp', 'level', 'function', 'message'
+  ]
+};
+
+// ============================================================
+// CONFIG LAYER — Script Properties reader / writer
+// Used everywhere in the codebase that needs runtime config.
+// ============================================================
+
+/**
+ * Read a runtime config value from Script Properties.
+ * Throws if the key hasn't been set via the ⚙️ Setup menu.
+ * 
+ * @param {string} propKey  One of the CONFIG.PROP_* constants
+ * @param {boolean} [required=true]  If false, returns null when unset instead of throwing
+ * @return {string|null}
+ */
+function getConfig_(propKey, required) {
+  if (required === undefined) required = true;
+  const value = PropertiesService.getScriptProperties().getProperty(propKey);
+  if (!value && required) {
+    throw new Error(
+      'Missing config: "' + propKey + '". ' +
+      'Open the ⚙️ Setup menu and configure this value.'
+    );
+  }
+  return value || null;
+}
+
+/**
+ * Persist a runtime config value to Script Properties.
+ * 
+ * @param {string} propKey
+ * @param {string} value
+ */
+function saveConfig_(propKey, value) {
+  if (!propKey) throw new Error('saveConfig_: propKey required');
+  PropertiesService.getScriptProperties().setProperty(propKey, String(value || ''));
+}
+
+/**
+ * Menu-driven Setup UI. Prompts for each configurable value one by one.
+ * Existing values are shown so the user can confirm or overwrite.
+ */
+function menu_setup() {
+  const ui = SpreadsheetApp.getUi();
+  const items = [
+    { key: CONFIG.PROP_LLM_API_KEY,           label: 'LLM API key' },
+    { key: CONFIG.PROP_EMAIL_RECIPIENTS,      label: 'Notification email recipient(s), comma-separated' },
+    { key: CONFIG.PROP_EMAIL_FROM_NAME,       label: 'Sender display name for notifications' },
+    { key: CONFIG.PROP_PARENT_FOLDER_ID,      label: 'Parent Drive folder ID (where inbox/archive live)' }
+  ];
+
+  for (const item of items) {
+    const current = PropertiesService.getScriptProperties().getProperty(item.key) || '(not set)';
+    const response = ui.prompt(
+      '⚙️ Setup: ' + item.label,
+      'Current value: ' + (item.key === CONFIG.PROP_LLM_API_KEY ? maskSecret_(current) : current) +
+        '\n\nEnter new value, or leave blank to keep current:',
+      ui.ButtonSet.OK_CANCEL
+    );
+    if (response.getSelectedButton() !== ui.Button.OK) {
+      ui.alert('Setup cancelled. Any changes so far are already saved.');
+      return;
+    }
+    const val = response.getResponseText().trim();
+    if (val) saveConfig_(item.key, val);
+  }
+
+  ui.alert(
+    '⚙️ Setup complete',
+    'Runtime config saved to Script Properties.\n\n' +
+    'Next: run the folder-setup and master-sheet-init commands from the menu ' +
+    'to provision the workspace.',
+    ui.ButtonSet.OK
+  );
+}
+
+function maskSecret_(value) {
+  if (!value || value === '(not set)') return value;
+  if (value.length <= 8) return '••••';
+  return value.substring(0, 4) + '••••' + value.substring(value.length - 4);
+}
+
+/**
+ * Attaches a top-level ⚙️ Setup menu. If your project already has an onOpen()
+ * for other menus, merge this into it (don't declare two onOpen functions).
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('⚙️ Setup')
+    .addItem('Configure keys, IDs, and recipients', 'menu_setup')
+    .addToUi();
+}
