@@ -178,4 +178,118 @@ function reAttributeLedger_() {
   const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
   const idxRawId = headers.indexOf('employee_raw_id');
   const idxCode = headers.indexOf('canonical_branch_code');
-  const data = sh.getRange(2, 1,
+  const data = sh.getRange(2, 1, lastRow - 1, sh.getLastColumn()).getValues();
+  let scanned = 0, filled = 0, stillUnmapped = 0;
+  const updates = [];
+  for (let i = 0; i < data.length; i++) {
+    if (data[i][idxCode]) continue;
+    scanned += 1;
+    const attrib = attributeBranch_(data[i][idxRawId]);
+    if (attrib.code) { filled += 1; updates.push([i + 2, attrib.code]); }
+    else stillUnmapped += 1;
+  }
+  for (const [row, code] of updates) sh.getRange(row, idxCode + 1).setValue(code);
+  return { scanned, filled, stillUnmapped };
+}
+
+function menu_showUnmapped() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName(CONFIG.SHEET_UNMAPPED);
+  if (!sh) { SpreadsheetApp.getUi().alert('Unmapped sheet not found.'); return; }
+  ss.setActiveSheet(sh);
+  SpreadsheetApp.getUi().alert('Unmapped IDs', 'Add mappings in _master_aliases (raw_id → canonical_code), then run Re-attribute ledger.', SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+function menu_bulkResolveUnmapped() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName(CONFIG.SHEET_UNMAPPED);
+  if (!sh || sh.getLastRow() < 2) { ui.alert('No unmapped entries.'); return; }
+
+  const resolveSheetName = '_resolve_unmapped';
+  let resolveSh = ss.getSheetByName(resolveSheetName);
+  if (resolveSh) ss.deleteSheet(resolveSh);
+  resolveSh = ss.insertSheet(resolveSheetName);
+
+  const data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
+  const header = ['raw_id', 'sample_employee_name', 'provider', 'count_seen', 'sample_amount', 'TOTAL_SPEND', 'CANONICAL_CODE (fill this)', 'SKIP?'];
+  resolveSh.getRange(1, 1, 1, header.length).setValues([header]).setFontWeight('bold').setBackground('#d9d9d9');
+  resolveSh.setFrozenRows(1);
+
+  const ledgerSh = ss.getSheetByName(CONFIG.SHEET_LEDGER);
+  const totalByRawId = new Map();
+  if (ledgerSh && ledgerSh.getLastRow() > 1) {
+    const lh = ledgerSh.getRange(1, 1, 1, ledgerSh.getLastColumn()).getValues()[0];
+    const iR = lh.indexOf('employee_raw_id'), iA = lh.indexOf('total_amount'), iC = lh.indexOf('canonical_branch_code');
+    ledgerSh.getRange(2, 1, ledgerSh.getLastRow() - 1, ledgerSh.getLastColumn()).getValues().forEach(r => {
+      const raw = String(r[iR] || '').trim();
+      const code = String(r[iC] || '').trim();
+      if (!raw || code) return;
+      totalByRawId.set(raw, (totalByRawId.get(raw) || 0) + (Number(r[iA]) || 0));
+    });
+  }
+
+  const enriched = data.map(row => ({
+    rawId: String(row[0] || '').trim(),
+    sampleName: row[1], provider: row[2], countSeen: row[4], sampleAmount: row[5],
+    totalSpend: totalByRawId.get(String(row[0] || '').trim()) || 0
+  })).sort((a, b) => b.totalSpend - a.totalSpend);
+
+  const outRows = enriched.map(e => [e.rawId, e.sampleName, e.provider, e.countSeen, e.sampleAmount, e.totalSpend, '', '']);
+  resolveSh.getRange(2, 1, outRows.length, header.length).setValues(outRows);
+  resolveSh.getRange(2, 6, outRows.length, 1).setNumberFormat('#,##0');
+  resolveSh.getRange(2, 7, outRows.length, 1).setBackground('#fff2cc');
+  resolveSh.autoResizeColumns(1, header.length);
+  ss.setActiveSheet(resolveSh);
+
+  ui.alert('Bulk resolve unmapped', 'Sorted by spend descending. Fill column G with canonical code, or SKIP in column H. Then run "Apply bulk resolutions".', ui.ButtonSet.OK);
+}
+
+function menu_applyBulkResolutions() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const resolveSh = ss.getSheetByName('_resolve_unmapped');
+  if (!resolveSh || resolveSh.getLastRow() < 2) { ui.alert('No _resolve_unmapped sheet.'); return; }
+
+  const data = resolveSh.getRange(2, 1, resolveSh.getLastRow() - 1, 8).getValues();
+  const aliasesToAdd = [], skipRawIds = [];
+  for (const row of data) {
+    const rawId = String(row[0] || '').trim();
+    const canonical = String(row[6] || '').trim();
+    const skip = String(row[7] || '').trim().toUpperCase();
+    if (!rawId) continue;
+    if (skip === 'SKIP') skipRawIds.push(rawId);
+    else if (canonical) aliasesToAdd.push({ rawId, canonicalCode: canonical });
+  }
+
+  if (aliasesToAdd.length === 0 && skipRawIds.length === 0) { ui.alert('Nothing to apply.'); return; }
+
+  if (ui.alert('Apply?', 'Add ' + aliasesToAdd.length + ' aliases, skip ' + skipRawIds.length + '. Continue?', ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
+
+  const aliasSh = ss.getSheetByName(CONFIG.SHEET_ALIASES);
+  if (aliasesToAdd.length > 0) {
+    const rows = aliasesToAdd.map(a => [a.rawId, normalizeMultiCode_(a.canonicalCode), new Date(), 'bulk-resolved']);
+    aliasSh.getRange(aliasSh.getLastRow() + 1, 1, rows.length, 4).setValues(rows);
+  }
+  if (skipRawIds.length > 0) {
+    const rows = skipRawIds.map(r => [r, '_IGNORED_', new Date(), 'bulk-skip']);
+    aliasSh.getRange(aliasSh.getLastRow() + 1, 1, rows.length, 4).setValues(rows);
+  }
+
+  clearAliasCache_();
+  const reattributed = reAttributeLedger_();
+
+  const handled = new Set([...aliasesToAdd.map(a => a.rawId), ...skipRawIds]);
+  const unmappedSh = ss.getSheetByName(CONFIG.SHEET_UNMAPPED);
+  if (unmappedSh && unmappedSh.getLastRow() > 1) {
+    const uData = unmappedSh.getRange(2, 1, unmappedSh.getLastRow() - 1, unmappedSh.getLastColumn()).getValues();
+    const keep = uData.filter(r => !handled.has(String(r[0]).trim()));
+    const headers = unmappedSh.getRange(1, 1, 1, unmappedSh.getLastColumn()).getValues();
+    unmappedSh.clear();
+    unmappedSh.getRange(1, 1, 1, headers[0].length).setValues(headers).setFontWeight('bold').setBackground('#f0f0f0');
+    if (keep.length > 0) unmappedSh.getRange(2, 1, keep.length, headers[0].length).setValues(keep);
+  }
+
+  ss.deleteSheet(resolveSh);
+  ui.alert('Done', 'Added: ' + aliasesToAdd.length + '\nSkipped: ' + skipRawIds.length + '\nRe-attributed: ' + reattributed.filled, ui.ButtonSet.OK);
+}
